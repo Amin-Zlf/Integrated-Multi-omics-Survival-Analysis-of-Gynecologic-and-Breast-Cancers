@@ -2,3 +2,4 @@ BRCA_curated.RData filter=lfs diff=lfs merge=lfs -text
 CESC_curated.RData filter=lfs diff=lfs merge=lfs -text
 OV_curated.RData filter=lfs diff=lfs merge=lfs -text
 UCEC_curated.RData filter=lfs diff=lfs merge=lfs -text
+UCS_curated.RData filter=lfs diff=lfs merge=lfs -text
