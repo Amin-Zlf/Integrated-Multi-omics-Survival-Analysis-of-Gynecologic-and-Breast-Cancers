@@ -1,0 +1,583 @@
+## 1. loading the required libraries
+
+library(org.Hs.eg.db)
+library(pheatmap)
+library(RColorBrewer)
+library(EDASeq)
+library(graphite)
+library(houseOfClipUtility)
+library(MOSClip)
+library(curatedTCGAData)
+library(TCGAutils)
+library(tidyverse)
+library(dplyr)
+library(Hmisc)
+library(readxl)
+library(data.table)
+library(gridExtra)
+library(ggVennDiagram)
+library(ggplot2)
+library(reshape2)
+library(igraph)
+library(openxlsx)
+library(penalized)
+library(gridExtra)
+library(cowplot)
+library(survival)
+library(survminer)
+
+## 2. Downloading the Data
+
+### 2.1 BRCA
+
+BRCA_curated <- curatedTCGAData(diseaseCode = "BRCA", assays = c("RNASeqGene", "GISTIC_AllByGene", "Methylation*", "Mutation"), version = "2.0.1", dry.run = F)
+
+### 2.2 CESC
+
+CESC_curated <- curatedTCGAData(diseaseCode = "CESC", assays = c("RNASeq2Gene", "GISTIC_AllByGene", "Methylation*", "Mutation"), version = "2.0.1", dry.run = F)
+
+### 2.3 OV
+
+OV_curated <- curatedTCGAData(diseaseCode = "OV", assays = c("RNASeqGene", "GISTIC_AllByGene", "Methylation*", "Mutation"), version = "2.0.1", dry.run = F)
+
+### 2.4 UCEC
+
+UCEC_curated <- curatedTCGAData(diseaseCode = "UCEC", assays = c("RNASeqGene", "GISTIC_AllByGene", "Methylation*", "Mutation"), version = "2.0.1", dry.run = F)
+
+### 2.5 UCS
+
+UCS_curated <- curatedTCGAData(diseaseCode = "UCS", assays = c("RNASeq2Gene", "GISTIC_AllByGene", "Methylation*", "Mutation"), version = "2.0.1", dry.run = F)
+
+## 3. Selecting the primary tumors
+
+#It provides the information regarding the code corresponding to a specific type of cancer type 
+data(sampleTypes, package = "TCGAutils") 
+
+### 3.1 BRCA
+
+sampleTables(BRCA_curated) #It shows what types of tumor cells exist in out data
+BRCA_curated <- TCGAsplitAssays(BRCA_curated, "01")
+
+### 3.2 CESC
+
+sampleTables(CESC_curated) #It shows what types of tumor cells exist in out data
+CESC_curated <- TCGAsplitAssays(CESC_curated, "01")
+
+### 3.3 OV
+
+sampleTables(OV_curated) #It shows what types of tumor cells exist in out data
+OV_curated <- TCGAsplitAssays(OV_curated, "01")
+
+### 3.4 UCEC
+
+sampleTables(UCEC_curated) #It shows what types of tumor cells exist in out data
+UCEC_curated <- TCGAsplitAssays(UCEC_curated, "01")
+
+### 3.5 UCS
+
+sampleTables(UCS_curated) #It shows what types of tumor cells exist in out data
+UCS_curated <- TCGAsplitAssays(UCS_curated, "01")
+
+## 4. Preparing the CNV data frame
+
+cnv_prep <- function(multiassay, assay){
+  #Creating the initial data frames
+  print("Creating the initial data frames")
+  CNV_gene_symbol <- data.frame(rowData(multiassay[[assay]])) 
+  CNV <- data.frame(assay(multiassay, assay)) 
+  #Converting each element from a character to numeric
+  print("Converting each element from character to numeric")
+  CNV <- data.frame(lapply(CNV, as.numeric))
+  #Converting the GISTIC values to gain,loss or not change (+1, -1, 0) 
+  print("Converting the GISTIC values to gain,loss or not change (+1, -1, 0)")
+  CNV[CNV < -0.3] <- -1
+  CNV[CNV > 0.3] <- 1
+  CNV[(CNV >= -0.3) & (CNV <= 0.3)] <- 0
+  #Adding the gene symbols to the initial data frame
+  print("Adding the gene symbols to the initial data frame")
+  CNV$genes <- CNV_gene_symbol$Gene.Symbol
+  #relocating the gene column,from the last to the first column
+  CNV <- CNV[,c(ncol(CNV), 1:(ncol(CNV)-1))]
+  #Creating 2 separated data frames for Symbol and Ensembl based on having "|" in their gene  name
+  print("Creating 2 separated data frames for Symbol and Ensembl")
+  c <- subset(CNV, grepl("\\|", genes))
+  b <- subset(CNV, !grepl("\\|", genes))
+  #Adding entrezid id 
+  print("Adding entrezid id ")
+  entrezid_b <- AnnotationDbi::select(org.Hs.eg.db, keys= b$genes, keytype = "SYMBOL" ,columns = "ENTREZID")
+  entrezid_b <- entrezid_b[!duplicated(entrezid_b$SYMBOL),]
+  # changing the gene column from Symbol to Entrez id
+  b$genes <- entrezid_b$ENTREZID
+  #separating Ensembl ids from the first part
+  dot <- sapply(strsplit(c$genes, split = "\\|"), `[`, 2)
+  en <- sapply(strsplit(dot, split = "\\."), `[`, 1)
+  # changing the gene column from Symbol to Entrez id
+  c$genes <- en
+  entrezid_c <- AnnotationDbi::select(org.Hs.eg.db, keys= c$genes, keytype = "ENSEMBL" ,columns = "ENTREZID")
+  entrezid_c <- entrezid_c[!duplicated(entrezid_c$ENSEMBL),]
+  c$genes <- entrezid_c$ENTREZID
+  #Removing rows without a Entrez gene id
+  b <- b[!is.na(b$genes),]
+  c <- c[!is.na(c$genes),]
+  CNV <- rbind(b, c)
+  #Adding "ENTREZID:" to the beginning of the Entrez ids
+  row.names(CNV) <- paste0("ENTREZID:", CNV$genes)
+  CNV <- CNV[,-1]
+  #Converting the patients names
+  print("Converting the patients names")
+  colnames(CNV) <- substr(colnames(CNV), 1, 12)
+  return(CNV)
+}
+
+### 4.1 BRCA
+
+startTime <- Sys.time()
+BRCA_CNV <- cnv_prep(multiassay = BRCA_curated, assay = "01_BRCA_GISTIC_AllByGene-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 17.78828 secs
+
+#### 4.1.1 Removing the male patients from BRCA_CNV
+
+males_females <- as.data.frame(colData(BRCA_curated))
+males_females <- males_females[,"gender", drop = F]
+rownames(males_females) <- gsub("-", ".", rownames(males_females))
+males_females <- males_females[!is.na(males_females$gender), , drop= F]
+males_females <- males_females[males_females$gender == "female",, drop = F]
+BRCA_CNV <- BRCA_CNV[, colnames(BRCA_CNV) %in% rownames(males_females)]
+
+### 4.2 CESC
+
+startTime <- Sys.time()
+CESC_CNV <- cnv_prep(multiassay = CESC_curated, assay = "01_CESC_GISTIC_AllByGene-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 3.081254 secs
+
+### 4.3 OV
+
+startTime <- Sys.time()
+OV_CNV <- cnv_prep(multiassay = OV_curated, assay = "01_OV_GISTIC_AllByGene-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 4.939059 secs
+
+### 4.4 UCEC
+
+startTime <- Sys.time()
+UCEC_CNV <- cnv_prep(multiassay = UCEC_curated, assay = "01_UCEC_GISTIC_AllByGene-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 6.170712 secs
+
+### 4.5 UCS
+
+startTime <- Sys.time()
+UCS_CNV <- cnv_prep(multiassay = UCS_curated, assay = "01_UCS_GISTIC_AllByGene-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 1.568879 secs
+
+## 5. Preparing the RNASeqGene
+
+expression_prep <- function(multiassay, assay){
+  # creating the matrix
+  print("creating the matrix")
+  Expression <- data.frame(assay(multiassay, assay))
+  #Converting the patients names
+  print("Converting the patients names")
+  colnames(Expression) <- substr(colnames(Expression), 1, 12)
+  # Keeping only the genes with an expression of more than 100 at least in one patient 
+  print("Filtering genes based on their expression")
+  keep = apply(Expression >= 100, 1, any)
+  Expression <- Expression[keep, , drop = F]
+  #Normalizing the gene counts
+  print("Normalizing the gene counts")
+  expNorm <- data.frame(betweenLaneNormalization(as.matrix(Expression), which = "upper"))
+  # Converting the expression to log scale
+  print("Converting the expression to log scale")
+  pseudoExpNorm <- log2(expNorm + 1)
+  #Adding entrezid id 
+  print("Adding entrezid id")
+  entrezid <- AnnotationDbi::select(org.Hs.eg.db, keys= row.names(pseudoExpNorm), keytype = "SYMBOL" ,columns = "ENTREZID")
+  entrezid <- entrezid[!duplicated(entrezid$SYMBOL),]
+  pseudoExpNorm$gene <- entrezid$ENTREZID
+  pseudoExpNorm <- pseudoExpNorm[!is.na(pseudoExpNorm$gene), ]
+  rownames(pseudoExpNorm) <- pseudoExpNorm$gene
+  pseudoExpNorm$gene <-  NULL
+  #adding ENTREZ: to the gene ids
+  row.names(pseudoExpNorm) <- paste0("ENTREZID:", row.names(pseudoExpNorm))
+  return(pseudoExpNorm)
+}
+
+### 5.1 BRCA
+
+startTime <- Sys.time()
+BRCA_EXP <- expression_prep(multiassay = BRCA_curated, assay = "01_BRCA_RNASeqGene-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 5.309786 secs
+
+#### 5.1.1 Removing the male patients from BRCA_EXP
+
+males_females <- as.data.frame(colData(BRCA_curated))
+males_females <- males_females[,"gender", drop = F]
+rownames(males_females) <- gsub("-", ".", rownames(males_females))
+males_females <- males_females[!is.na(males_females$gender), , drop= F]
+males_females <- males_females[males_females$gender == "female",, drop = F]
+BRCA_EXP <- BRCA_EXP[, colnames(BRCA_EXP) %in% rownames(males_females)]
+
+### 5.2 CESC
+
+startTime <- Sys.time()
+CESC_EXP <- expression_prep(multiassay = CESC_curated, assay = "01_CESC_RNASeq2Gene-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 2.746489 secs
+
+### 5.3 OV
+
+startTime <- Sys.time()
+OV_EXP <- expression_prep(multiassay = OV_curated, assay = "01_OV_RNASeqGene-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 2.565668 secs
+
+### 5.4 UCEC
+
+startTime <- Sys.time()
+UCEC_EXP <- expression_prep(multiassay = UCEC_curated, assay = "01_UCEC_RNASeqGene-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 2.668713 secs
+
+### 5.5 UCS
+
+startTime <- Sys.time()
+UCS_EXP <- expression_prep(multiassay = UCS_curated, assay = "01_UCS_RNASeq2Gene-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 0.839983 secs
+
+## 6. Preparing the Methylation
+
+methylation_prep <- function(multiassay, assay){
+  #creating the matrix
+  print("creating the matrix")
+  Methylation <- data.frame(assay(multiassay, assay))
+  #Imputing the NA values with the median
+  print("Imputing the NA values with the median")
+  Methylation[] <- lapply(Methylation, Hmisc::impute, median)
+  #Taking into account the CpG islands which are in common between 2 genes
+  print("Taking in to the account the CpG islands which are in common between 2 genes")
+  #Making a data frame out of the rowdata
+  Methylation_gene_symbol <- data.frame(rowData(multiassay[[assay]]))
+  #Adding the gene names to the methylation data frame
+  Methylation$Gene_Symbol <- Methylation_gene_symbol$Gene_Symbol
+  Methylation <- Methylation[,c(ncol(Methylation), 1:(ncol(Methylation)-1))]
+  Methylation$probe <- rownames(Methylation)
+  rownames(Methylation) <- NULL
+  Methylation <- Methylation[,c(ncol(Methylation), 1:(ncol(Methylation)-1))]
+  # Find the rows that contain ";"
+  rows_to_split <- which(grepl(";", Methylation$Gene_Symbol))
+  # Split the Gene_Symbol values by ";"
+  probes_split <- strsplit(Methylation[rows_to_split, "Gene_Symbol"], ";")
+  # Create a new data frame with the split Gene_Symbol values
+  new_data_frame <- Methylation[rows_to_split, ]
+  new_data_frame$Gene_Symbol <- sapply(probes_split, `[`, 2)
+  # Update the original data frame with the first split Gene_Symbol value
+  Methylation[rows_to_split, "Gene_Symbol"] <- sapply(probes_split, `[`, 1)
+  # Combine the original and new data frames
+  Methylation <- rbind(Methylation, new_data_frame)
+  #Assigning the gene symbols instead of CpG islands and setting the duplicates to the average unique value
+  print("Assigning the gene symbols instead of CpG islands")
+  Methylation <- Methylation[!is.na(Methylation$Gene_Symbol), ]
+  # Convert Methylation data frame to a data.table to be optimized
+  MethylationDT <- as.data.table(Methylation)
+  # Use data.table syntax to calculate mean by group
+  result <- MethylationDT[, lapply(.SD, mean, na.rm=TRUE), by=Gene_Symbol, .SDcols=3:length(colnames(Methylation))]
+  #converting back the data.table to a data.frame 
+  Methylation <- as.data.frame(result)
+  rownames(Methylation) <- Methylation$Gene_Symbol
+  Methylation$Gene_Symbol <- NULL
+  #Adding entrezid id 
+  print("Adding entrezid id")
+  entrezid <- AnnotationDbi::select(org.Hs.eg.db, keys= row.names(Methylation), keytype = "SYMBOL" ,columns = "ENTREZID")
+  entrezid <- entrezid[!duplicated(entrezid$SYMBOL),]
+  Methylation$entrez <- entrezid$ENTREZID
+  Methylation <- Methylation[!is.na(Methylation$entrez),]
+  rownames(Methylation) <- Methylation$entrez
+  Methylation$entrez <-  NULL
+  #Adding the "ENTREZID:" to the beginning of the entrez ids
+  row.names(Methylation) <- paste0("ENTREZID:", row.names(Methylation))
+  #Converting the patients names
+  print("Converting the patients names")
+  colnames(Methylation) <- substr(colnames(Methylation), 1, 12)
+  return(Methylation)
+}
+
+### 6.1 BRCA
+
+startTime <- Sys.time()
+BRCA_Methylation <- methylation_prep(multiassay = BRCA_curated, assay = "01_BRCA_Methylation_methyl450-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 2.74259 mins
+
+#### 6.1.1 Removing the male patients from BRCA_Methylation
+
+males_females <- as.data.frame(colData(BRCA_curated))
+males_females <- males_females[,"gender", drop = F]
+rownames(males_females) <- gsub("-", ".", rownames(males_females))
+males_females <- males_females[!is.na(males_females$gender), , drop= F]
+males_females <- males_females[males_females$gender == "female",, drop = F]
+BRCA_Methylation <- BRCA_Methylation[, colnames(BRCA_Methylation) %in% rownames(males_females)]
+
+### 6.2 CESC
+
+startTime <- Sys.time()
+CESC_Methylation <- methylation_prep(multiassay = CESC_curated, assay = "01_CESC_Methylation-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 49.1605 secs
+
+### 6.3 OV
+
+startTime <- Sys.time()
+OV_Methylation <- methylation_prep(multiassay = OV_curated, assay = "01_OV_Methylation_methyl27-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 7.542624 secs
+
+### 6.4 UCEC
+
+startTime <- Sys.time()
+UCEC_Methylation <- methylation_prep(multiassay = UCEC_curated, assay = "01_UCEC_Methylation_methyl450-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 1.428745 mins
+
+### 6.5 UCS
+
+startTime <- Sys.time()
+UCS_Methylation <- methylation_prep(multiassay = UCS_curated, assay = "01_UCS_Methylation-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 11.52207 secs
+
+## 7. Preparing the Mutation
+
+mutation_prep <- function(multiassay, assay){
+  #creating the data.frame
+  print("creating the matrix")
+  Mutation <- data.frame(assay(multiassay[[assay]], "Hugo_Symbol"))
+  #Creating a matrix to filter silent mutations
+  classification <- data.frame(assay(multiassay[[assay]], "Variant_Classification"))
+  # Set values in "Mutation df" to NA if corresponding value in "classification df" is "silent"
+  print("discarding the Silent mutations")
+  Mutation[!is.na(Mutation) & classification == "Silent"] <- NA
+  #Changing gene position to gene symbols
+  print("Changing gene position to gene symbols")
+  Mutation$genes <- rownames(Mutation)
+  Mutation <- Mutation[,c(ncol(Mutation), 1:(ncol(Mutation)-1))]
+  # Remove rows that contain only NA values
+  Mutation <- Mutation[rowSums(!is.na(Mutation)) > 1, ]
+  # Assign the second non-NA value of each row to the first non-NA value
+  Mutation$genes <- apply(Mutation, 1, function(x) x[which(!is.na(x))[2]])
+  #changing NA values to 0 and genes names to 1
+  print("changing NA values to 0 and genes names to 1")
+  Mutation[,-1][!is.na(Mutation[,-1])] <- 1
+  Mutation[,-1][is.na(Mutation[,-1])] <- 0
+  #collapsing the position mutation to have gene mutation
+  print("collapsing the position mutation to have gene mutation")
+  Mutation <- as.data.table(Mutation)
+  Mutation <- Mutation[, lapply(.SD, max), by = genes]
+  Mutation <- as.data.frame(Mutation)
+  rownames(Mutation) <- Mutation$genes
+  Mutation$genes <- NULL
+  #Adding entrezid id
+  print("Adding entrezid id")
+  entrezid <- AnnotationDbi::select(org.Hs.eg.db, keys= row.names(Mutation), keytype = "SYMBOL" ,columns = "ENTREZID")
+  entrezid <- entrezid[!duplicated(entrezid$SYMBOL),]
+  Mutation$genes <- entrezid$ENTREZID
+  Mutation <- Mutation[!is.na(Mutation$genes),]
+  rownames(Mutation) <- Mutation$genes
+  Mutation$genes <-  NULL
+  #Adding "ENTREZID:" to the beginning of the Entrez ids
+  row.names(Mutation) <- paste0("ENTREZID:", row.names(Mutation))
+  #Converting the patients names
+  print("Converting the patients names")
+  colnames(Mutation) <- substr(colnames(Mutation), 1, 12)
+  return(Mutation)
+}
+
+### 7.1 BRCA
+
+startTime <- Sys.time()
+BRCA_Mutation <- mutation_prep(multiassay = BRCA_curated, assay = "01_BRCA_Mutation-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 45.06972 secs
+
+#### 7.1.1 Removing the male patients from BRCA_Mutation
+
+males_females <- as.data.frame(colData(BRCA_curated))
+males_females <- males_females[,"gender", drop = F]
+rownames(males_females) <- gsub("-", ".", rownames(males_females))
+males_females <- males_females[!is.na(males_females$gender), , drop= F]
+males_females <- males_females[males_females$gender == "female",, drop = F]
+BRCA_Mutation <- BRCA_Mutation[, colnames(BRCA_Mutation) %in% rownames(males_females)]
+
+### 7.2 CESC
+
+startTime <- Sys.time()
+CESC_Mutation <- mutation_prep(multiassay = CESC_curated, assay = "01_CESC_Mutation-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 5.757778 secs
+
+### 7.3 OV
+
+startTime <- Sys.time()
+OV_Mutation <- mutation_prep(multiassay = OV_curated, assay = "01_OV_Mutation-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 4.921426 secs
+
+### 7.4 UCEC
+
+startTime <- Sys.time()
+UCEC_Mutation <- mutation_prep(multiassay = UCEC_curated, assay = "01_UCEC_Mutation-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 28.78282 secs
+
+### 7.5 UCS
+
+startTime <- Sys.time()
+UCS_Mutation <- mutation_prep(multiassay = UCS_curated, assay = "01_UCS_Mutation-20160128")
+endTime <- Sys.time()
+print(endTime - startTime) #Time difference of 1.153516 secs
+
+## 8. Creating the approprate survival data
+
+survival_prep <- function(excel_file, cancer_type){
+  #Creating the survival data frame with PFS
+  print("Creating the survival data frame with PFS")
+  survival_info <- excel_file[excel_file$type == cancer_type, c("bcr_patient_barcode","PFS", "PFS.time")]
+  survival_info <- na.omit(survival_info)
+  #Changing the - to . in patient barcode
+  print("Changing the - to . in patient barcode")
+  survival_info$bcr_patient_barcode <- gsub("-", ".", survival_info$bcr_patient_barcode)
+  #Creating the appropriate data frame for MOSClip
+  print("Creating the appropriate data frame for MOSClip")
+  survival_info <- data.frame(survival_info[,-1], row.names = survival_info$bcr_patient_barcode)
+  #Changing the column names and units
+  print("Changing the column names and units")
+  colnames(survival_info)[2] <- "days"
+  colnames(survival_info)[1] <- "status"
+  return(survival_info)
+}
+
+#uploading the excel file for survival
+annotation_excel <- read_excel("/Users/amin_zlf/Downloads/Writing-my-Thesis/TCGA-CDR-SupplementalTableS1.xlsx", sheet = "ExtraEndpoints")
+
+### 8.1 BRCA
+
+survival_BRCA <- survival_prep(annotation_excel, "BRCA")
+
+### 8.2 CESC
+
+survival_CESC <- survival_prep(annotation_excel, "CESC")
+
+### 8.3 OV
+
+survival_OV <- survival_prep(annotation_excel, "OV")
+
+### 8.4 UCEC
+
+survival_UCEC <- survival_prep(annotation_excel, "UCEC")
+
+### 8.5 UCS
+
+survival_UCS <- survival_prep(annotation_excel, "UCS")
+
+## 9. Selecting the patients for whom all of the omics data are available
+
+### 9.1 BRCA
+
+patients <- row.names(survival_BRCA)
+patients <- intersect(patients, colnames(BRCA_CNV))
+patients <- intersect(patients, colnames(BRCA_Mutation))
+patients <- intersect(patients, colnames(BRCA_Methylation))
+patients <- intersect(patients, colnames(BRCA_EXP))
+survival_BRCA <- survival_BRCA[patients, , drop = F]
+save(survival_BRCA, file = "./survival_BRCA.RData")
+BRCA_EXP <- BRCA_EXP[ , patients, drop = F]
+save(BRCA_EXP, file = "./BRCA_EXP.RData")
+BRCA_CNV <- BRCA_CNV[,patients, drop = F]
+save(BRCA_CNV, file = "./BRCA_CNV.RData")
+BRCA_Methylation <- BRCA_Methylation[,patients, drop = F]
+save(BRCA_Methylation, file = "./BRCA_Methylation.RData")
+BRCA_Mutation <- BRCA_Mutation[, patients, drop = F]
+save(BRCA_Mutation, file = "./BRCA_Mutation.RData")
+
+### 9.2 CESC
+
+patients <- row.names(survival_CESC)
+patients <- intersect(patients, colnames(CESC_CNV))
+patients <- intersect(patients, colnames(CESC_Mutation))
+patients <- intersect(patients, colnames(CESC_Methylation))
+patients <- intersect(patients, colnames(CESC_EXP))
+survival_CESC <- survival_CESC[patients, , drop = F]
+save(survival_CESC, file = "./survival_CESC.RData")
+CESC_EXP <- CESC_EXP[ , patients, drop = F]
+save(CESC_EXP, file = "./CESC_EXP.RData")
+CESC_CNV <- CESC_CNV[,patients, drop = F]
+save(CESC_CNV, file = "./CESC_CNV.RData")
+CESC_Methylation <- CESC_Methylation[,patients, drop = F]
+save(CESC_Methylation, file = "./CESC_Methylation.RData")
+CESC_Mutation <- CESC_Mutation[, patients, drop = F]
+save(CESC_Mutation, file = "./CESC_Mutation.RData")
+
+### 9.3 OV
+
+patients <- row.names(survival_OV)
+patients <- intersect(patients, colnames(OV_CNV))
+patients <- intersect(patients, colnames(OV_Mutation))
+patients <- intersect(patients, colnames(OV_Methylation))
+patients <- intersect(patients, colnames(OV_EXP))
+survival_OV <- survival_OV[patients, , drop = F]
+save(survival_OV, file = "./survival_OV.RData")
+OV_EXP <- OV_EXP[ , patients, drop = F]
+save(OV_EXP, file = "./OV_EXP.RData")
+OV_CNV <- OV_CNV[,patients, drop = F]
+save(OV_CNV, file = "./OV_CNV.RData")
+OV_Methylation <- OV_Methylation[,patients, drop = F]
+save(OV_Methylation, file = "./OV_Methylation.RData")
+OV_Mutation <- OV_Mutation[, patients, drop = F]
+save(OV_Mutation, file = "./OV_Mutation.RData")
+
+### 9.4 UCEC
+
+patients <- row.names(survival_UCEC)
+patients <- intersect(patients, colnames(UCEC_CNV))
+patients <- intersect(patients, colnames(UCEC_Mutation))
+patients <- intersect(patients, colnames(UCEC_Methylation))
+patients <- intersect(patients, colnames(UCEC_EXP))
+survival_UCEC <- survival_UCEC[patients, , drop = F]
+save(survival_UCEC, file = "./survival_UCEC.RData")
+UCEC_EXP <- UCEC_EXP[ , patients, drop = F]
+save(UCEC_EXP, file = "./UCEC_EXP.RData")
+UCEC_CNV <- UCEC_CNV[,patients, drop = F]
+save(UCEC_CNV, file = "./UCEC_CNV.RData")
+UCEC_Methylation <- UCEC_Methylation[,patients, drop = F]
+save(UCEC_Methylation, file = "./UCEC_Methylation.RData")
+UCEC_Mutation <- UCEC_Mutation[, patients, drop = F]
+save(UCEC_Mutation, file = "./UCEC_Mutation.RData")
+
+### 9.5 UCS
+
+patients <- row.names(survival_UCS)
+patients <- intersect(patients, colnames(UCS_CNV))
+patients <- intersect(patients, colnames(UCS_Mutation))
+patients <- intersect(patients, colnames(UCS_Methylation))
+patients <- intersect(patients, colnames(UCS_EXP))
+survival_UCS <- survival_UCS[patients, , drop = F]
+save(survival_UCS, file = "./survival_UCS.RData")
+UCS_EXP <- UCS_EXP[ , patients, drop = F]
+save(UCS_EXP, file = "./UCS_EXP.RData")
+UCS_CNV <- UCS_CNV[,patients, drop = F]
+save(UCS_CNV, file = "./UCS_CNV.RData")
+UCS_Methylation <- UCS_Methylation[,patients, drop = F]
+save(UCS_Methylation, file = "./UCS_Methylation.RData")
+UCS_Mutation <- UCS_Mutation[, patients, drop = F]
+save(UCS_Mutation, file = "./UCS_Mutation.RData")
+
+## 10. Downloading the reactome once and for all
+
+reactome <- pathways("hsapiens", "reactome")
+reactome <- convertIdentifiers(reactome, "entrez")
+save(reactome, file = "./reactome.RData")
+
