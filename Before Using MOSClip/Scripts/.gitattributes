@@ -1,0 +1,2 @@
+# to exclude HTML files from language detection
+*.html linguist-detectable=false
