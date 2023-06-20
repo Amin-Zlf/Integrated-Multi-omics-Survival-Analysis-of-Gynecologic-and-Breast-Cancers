@@ -10,3 +10,4 @@ multiOmicsFullHuge_CESC.RData filter=lfs diff=lfs merge=lfs -text
 multiOmicsFullHuge_OV.RData filter=lfs diff=lfs merge=lfs -text
 multiOmicsFullHuge_UCEC.RData filter=lfs diff=lfs merge=lfs -text
 multiOmicsFullHuge_UCS.RData filter=lfs diff=lfs merge=lfs -text
+multiOmics_module_BRCA.RData filter=lfs diff=lfs merge=lfs -text
